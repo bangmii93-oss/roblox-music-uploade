@@ -387,10 +387,14 @@ const queueEl = document.getElementById('queue');
 const uploadBtn = document.getElementById('uploadBtn');
 const logEl = document.getElementById('log');
 
-// queueFiles: array of { file, displayName, operationId, status, assetId, error, el }
+// queueFiles: array of { file (File|null kalau dari localStorage), fileName, fileSize,
+// displayName, operationId, status, assetId, error }
 let queueFiles = [];
 let uploading = false;
 let pollTimer = null;
+let eventSource = null;
+
+const STORAGE_KEY = 'pacalank_upload_queue_v1';
 
 dropzone.addEventListener('click', () => audioFile.click());
 ['dragenter','dragover'].forEach(evt =>
@@ -411,6 +415,8 @@ function addFiles(fileList) {
   for (const file of fileList) {
     queueFiles.push({
       file,
+      fileName: file.name,
+      fileSize: file.size,
       displayName: file.name.replace(/\.[^/.]+$/, '').slice(0, 50),
       operationId: null,
       status: 'Queued',
@@ -423,8 +429,66 @@ function addFiles(fileList) {
 }
 
 function formatSize(bytes) {
+  if (!bytes && bytes !== 0) return '';
   if (bytes < 1024*1024) return (bytes/1024).toFixed(0) + ' KB';
   return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+
+// Simpan cuma metadata yang ringkas & bisa diserialisasi - File object
+// sengaja TIDAK disimpan (memang tidak bisa disimpan ke localStorage).
+// Ini yang bikin daftar upload tahan direfresh/ditutup tabnya.
+function persistQueue() {
+  const persistable = queueFiles
+    .filter(i => i.operationId) // yang belum keupload (Queued) tak perlu disimpan
+    .map(i => ({
+      operationId: i.operationId,
+      fileName: i.fileName,
+      fileSize: i.fileSize,
+      displayName: i.displayName,
+      status: i.status,
+      assetId: i.assetId,
+      error: i.error
+    }));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+  } catch (e) { /* localStorage penuh/nonaktif, abaikan saja */ }
+}
+
+function restoreQueue() {
+  let saved = [];
+  try {
+    saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  } catch (e) { saved = []; }
+  if (saved.length === 0) return;
+
+  queueFiles = saved.map(i => ({ ...i, file: null }));
+  renderQueue();
+  log(`> memulihkan ${saved.length} riwayat upload dari sesi sebelumnya...`);
+
+  // Ambil snapshot status terkini dulu (siapa tahu berubah selagi tab ditutup),
+  // baru setelah itu SSE yang jagain perubahan berikutnya secara realtime.
+  refreshSnapshot();
+}
+
+async function refreshSnapshot() {
+  const ids = queueFiles.filter(i => i.operationId).map(i => i.operationId);
+  if (ids.length === 0) return;
+  try {
+    const res = await fetch('/api/status-batch?ids=' + ids.join(','));
+    const data = await res.json();
+    queueFiles.forEach(item => {
+      const job = data[item.operationId];
+      if (job && job.status !== 'NotFound') {
+        item.status = job.status;
+        item.assetId = job.assetId;
+        item.error = job.error;
+      }
+    });
+    renderQueue();
+    persistQueue();
+  } catch (e) {
+    log('> gagal ambil status terakhir: ' + e.message);
+  }
 }
 
 function renderQueue() {
@@ -435,14 +499,15 @@ function renderQueue() {
 
     const statusClass = statusToClass(item.status);
     const statusLabel = statusToLabel(item);
+    const canEdit = !uploading && item.status === 'Queued';
 
     div.innerHTML = `
       <div class="queue-item-row">
-        <div class="queue-item-name">${item.file.name}</div>
-        <div class="queue-item-size">${formatSize(item.file.size)}</div>
-        ${!uploading ? `<button class="queue-item-remove" data-idx="${idx}">✕</button>` : ''}
+        <div class="queue-item-name">${item.fileName}</div>
+        <div class="queue-item-size">${formatSize(item.fileSize)}</div>
+        ${canEdit ? `<button class="queue-item-remove" data-idx="${idx}">✕</button>` : ''}
       </div>
-      ${!uploading ? `<input type="text" data-idx="${idx}" value="${item.displayName}" placeholder="nama tampilan di Roblox">` : ''}
+      ${canEdit ? `<input type="text" data-idx="${idx}" value="${item.displayName}" placeholder="nama tampilan di Roblox">` : ''}
       ${item.status !== 'Queued' ? `
         <div class="queue-item-status">
           <span class="led ${statusClass}"></span>
@@ -495,15 +560,16 @@ function log(msg) {
 }
 
 uploadBtn.addEventListener('click', async () => {
-  if (queueFiles.length === 0 || uploading) return;
+  const pending = queueFiles.filter(i => i.status === 'Queued');
+  if (pending.length === 0 || uploading) return;
   uploading = true;
   uploadBtn.disabled = true;
   uploadBtn.textContent = 'uploading...';
-  log(`> mengirim ${queueFiles.length} file ke roblox open cloud...`);
+  log(`> mengirim ${pending.length} file ke roblox open cloud...`);
 
   const formData = new FormData();
-  queueFiles.forEach(item => formData.append('audio', item.file));
-  formData.append('displayNames', JSON.stringify(queueFiles.map(i => i.displayName)));
+  pending.forEach(item => formData.append('audio', item.file));
+  formData.append('displayNames', JSON.stringify(pending.map(i => i.displayName)));
 
   try {
     const res = await fetch('/api/upload-batch', { method: 'POST', body: formData });
@@ -511,14 +577,14 @@ uploadBtn.addEventListener('click', async () => {
     if (!res.ok) throw new Error(data.error || 'Upload gagal');
 
     data.uploaded.forEach(u => {
-      const item = queueFiles.find(i => i.file.name === u.fileName && !i.operationId);
+      const item = pending.find(i => i.fileName === u.fileName && !i.operationId);
       if (item) {
         item.operationId = u.operationId;
         item.status = 'Pending';
       }
     });
     data.failed.forEach(f => {
-      const item = queueFiles.find(i => i.file.name === f.fileName && !i.operationId);
+      const item = pending.find(i => i.fileName === f.fileName && !i.operationId);
       if (item) {
         item.status = 'Error';
         item.error = f.error;
@@ -527,7 +593,10 @@ uploadBtn.addEventListener('click', async () => {
 
     log(`> ${data.uploaded.length} file diterima roblox, ${data.failed.length} gagal terkirim`);
     renderQueue();
-    pollAll();
+    persistQueue();
+    uploading = false;
+    uploadBtn.disabled = queueFiles.some(i => i.status === 'Queued') === false;
+    uploadBtn.textContent = 'upload --batch';
   } catch (err) {
     log('> gagal upload batch: ' + err.message);
     uploading = false;
@@ -536,53 +605,47 @@ uploadBtn.addEventListener('click', async () => {
   }
 });
 
-async function pollAll() {
-  clearTimeout(pollTimer);
-  const ids = queueFiles.filter(i => i.operationId).map(i => i.operationId);
-  if (ids.length === 0) return;
+/**
+ * REALTIME: satu koneksi SSE yang dengar SEMUA perubahan status dari server.
+ * Begitu Roblox/Studio selesai moderasi (approved/ditolak), server langsung
+ * dorong event ini - tidak perlu nunggu giliran polling lagi.
+ */
+function connectRealtime() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource('/api/events');
 
-  try {
-    const res = await fetch('/api/status-batch?ids=' + ids.join(','));
-    const data = await res.json();
+  eventSource.onmessage = (e) => {
+    let payload;
+    try { payload = JSON.parse(e.data); } catch (err) { return; }
 
-    let stillPending = false;
-    queueFiles.forEach(item => {
-      if (!item.operationId) return;
-      const job = data[item.operationId];
-      if (!job) return;
-      if (job.status !== item.status || job.assetId !== item.assetId) {
-        if (job.status === 'Approved' && item.status !== 'Approved') {
-          log(`> ${item.file.name} — lolos moderasi (asset id ${job.assetId})`);
-        }
-        if (job.status === 'Rejected' && item.status !== 'Rejected') {
-          log(`> ${item.file.name} — ditolak moderasi roblox`);
-        }
-      }
-      item.status = job.status;
-      item.assetId = job.assetId;
-      item.error = job.error;
-      if (job.status === 'Pending') stillPending = true;
-    });
+    const item = queueFiles.find(i => i.operationId === payload.operationId);
+    if (!item) return; // update buat job yang tidak lagi kita lacak di tab ini
+
+    const changed = item.status !== payload.status || item.assetId !== payload.assetId;
+    if (changed) {
+      if (payload.status === 'Approved') log(`> ${item.fileName} — lolos moderasi (asset id ${payload.assetId})`);
+      if (payload.status === 'Rejected') log(`> ${item.fileName} — ditolak moderasi roblox`);
+      if (payload.status === 'AwaitingManualRecheck') log(`> ${item.fileName} — auto-check berhenti, cek ulang manual kalau perlu`);
+    }
+
+    item.status = payload.status;
+    item.assetId = payload.assetId;
+    item.error = payload.error;
 
     renderQueue();
+    persistQueue();
+  };
 
-    if (stillPending) {
-      pollTimer = setTimeout(pollAll, 3000);
-    } else {
-      uploading = false;
-      uploadBtn.disabled = queueFiles.length === 0;
-      uploadBtn.textContent = 'upload --batch';
-    }
-  } catch (err) {
-    log('> gagal cek status batch: ' + err.message);
-    pollTimer = setTimeout(pollAll, 5000);
-  }
+  eventSource.onerror = () => {
+    // Browser otomatis reconnect EventSource sendiri, cukup catat di log.
+    log('> koneksi realtime terputus, mencoba menyambung ulang...');
+  };
 }
 
 async function recheckOne(idx) {
   const item = queueFiles[idx];
   if (!item || !item.operationId) return;
-  log(`> cek ulang manual: ${item.file.name}`);
+  log(`> cek ulang manual: ${item.fileName}`);
 
   try {
     const res = await fetch(`/api/recheck/${item.operationId}`, { method: 'POST' });
@@ -593,16 +656,17 @@ async function recheckOne(idx) {
     item.assetId = data.assetId;
     item.error = data.error;
     renderQueue();
-
-    if (data.status === 'Pending') {
-      uploading = true;
-      pollAll();
-    }
+    persistQueue();
   } catch (err) {
     log('> gagal cek ulang: ' + err.message);
   }
 }
+
+// Boot: sambungkan realtime dulu, baru pulihkan riwayat upload kalau ada.
+connectRealtime();
+restoreQueue();
 </script>
 
 </body>
 </html>
+
