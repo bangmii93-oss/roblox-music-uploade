@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Roblox Music Uploader</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --accent:#00b06b; --text:#e8eaed; --muted:#9aa0a6; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px;
+  }
+  .card {
+    background: var(--card); border-radius: 14px; padding: 24px;
+    max-width: 480px; margin: 0 auto 16px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  label { display:block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+  input[type=text], input[type=file] {
+    width:100%; padding:10px; border-radius:8px; border:1px solid #2a2e37;
+    background:#0f1115; color:var(--text); font-size:14px;
+  }
+  input[type=range] { width:100%; }
+  audio { width:100%; margin-top:8px; }
+  button {
+    margin-top:18px; width:100%; padding:12px; border:none; border-radius:8px;
+    background: var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+  }
+  button:disabled { background:#2a2e37; color:var(--muted); cursor:not-allowed; }
+  .status { margin-top:14px; font-size:14px; }
+  .status.pending { color:#f5b942; }
+  .status.approved { color:#00e08a; }
+  .status.error { color:#ff5c5c; }
+  .asset-id { font-weight:700; font-size:16px; user-select:all; }
+  .speed-label { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>🎵 Roblox Music Uploader</h1>
+
+  <label>File audio</label>
+  <input type="file" id="audioFile" accept="audio/*">
+
+  <div id="previewSection" style="display:none;">
+    <label>Preview</label>
+    <audio id="previewPlayer" controls></audio>
+    <div class="speed-label">
+      <span>Playback speed</span>
+      <span id="speedValue">1.0x</span>
+    </div>
+    <input type="range" id="speedSlider" min="0.5" max="2" step="0.05" value="1">
+  </div>
+
+  <label>Nama tampilan (displayName)</label>
+  <input type="text" id="displayName" placeholder="Contoh: Lobby Theme">
+
+  <button id="uploadBtn" disabled>Upload ke Roblox</button>
+
+  <div id="statusBox" class="status"></div>
+</div>
+
+<script>
+const audioFile = document.getElementById('audioFile');
+const previewSection = document.getElementById('previewSection');
+const previewPlayer = document.getElementById('previewPlayer');
+const speedSlider = document.getElementById('speedSlider');
+const speedValue = document.getElementById('speedValue');
+const displayName = document.getElementById('displayName');
+const uploadBtn = document.getElementById('uploadBtn');
+const statusBox = document.getElementById('statusBox');
+
+let selectedFile = null;
+
+audioFile.addEventListener('change', () => {
+  selectedFile = audioFile.files[0];
+  if (!selectedFile) return;
+  const url = URL.createObjectURL(selectedFile);
+  previewPlayer.src = url;
+  previewSection.style.display = 'block';
+  uploadBtn.disabled = false;
+  if (!displayName.value) {
+    displayName.value = selectedFile.name.replace(/\.[^/.]+$/, '');
+  }
+});
+
+speedSlider.addEventListener('input', () => {
+  const rate = parseFloat(speedSlider.value);
+  previewPlayer.playbackRate = rate;
+  speedValue.textContent = rate.toFixed(2) + 'x';
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  uploadBtn.disabled = true;
+  setStatus('Mengupload ke Roblox...', 'pending');
+
+  const formData = new FormData();
+  formData.append('audio', selectedFile);
+  formData.append('displayName', displayName.value || selectedFile.name);
+
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload gagal');
+
+    setStatus('Menunggu moderasi Roblox...', 'pending');
+    pollStatus(data.operationId);
+  } catch (err) {
+    setStatus('Gagal: ' + err.message, 'error');
+    uploadBtn.disabled = false;
+  }
+});
+
+async function pollStatus(operationId) {
+  try {
+    const res = await fetch(`/api/status/${operationId}`);
+    const data = await res.json();
+
+    if (data.status === 'Approved') {
+      statusBox.className = 'status approved';
+      statusBox.innerHTML = `✅ Lolos moderasi! Asset ID: <span class="asset-id">${data.assetId}</span>`;
+      uploadBtn.disabled = false;
+      return;
+    }
+    if (data.status === 'Rejected' || data.status === 'Error' || data.status === 'Timeout') {
+      setStatus('Gagal: ' + (data.error || data.status), 'error');
+      uploadBtn.disabled = false;
+      return;
+    }
+
+    setStatus('Menunggu moderasi Roblox... (' + data.status + ')', 'pending');
+    setTimeout(() => pollStatus(operationId), 3000);
+  } catch (err) {
+    setStatus('Gagal cek status: ' + err.message, 'error');
+    uploadBtn.disabled = false;
+  }
+}
+
+function setStatus(text, type) {
+  statusBox.className = 'status ' + type;
+  statusBox.textContent = text;
+}
+</script>
+
+</body>
+</html>
