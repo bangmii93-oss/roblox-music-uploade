@@ -224,6 +224,63 @@
     padding: 7px 9px;
   }
 
+  .preview-audio {
+    width: 100%;
+    height: 32px;
+    margin-top: 10px;
+    accent-color: var(--violet);
+  }
+  .preview-audio::-webkit-media-controls-panel {
+    background: var(--void);
+  }
+
+  .speed-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .speed-row input[type=range] {
+    flex: 1;
+    accent-color: var(--violet);
+  }
+  .speed-val {
+    color: var(--violet-bright);
+    width: 42px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .speed-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .mini-btn {
+    flex: 1;
+    background: rgba(178,107,255,0.08);
+    border: 1px solid var(--line-dim);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 7px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    width: auto;
+    margin: 0;
+  }
+  .mini-btn:hover:not(:disabled) {
+    border-color: var(--violet);
+    color: var(--violet-bright);
+  }
+  .mini-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+  .mini-btn.applied {
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+
   .queue-item-status {
     margin-top: 8px;
     font-size: 12px;
@@ -421,7 +478,11 @@ function addFiles(fileList) {
       operationId: null,
       status: 'Queued',
       assetId: null,
-      error: null
+      error: null,
+      previewUrl: URL.createObjectURL(file),
+      speed: 1,
+      speedApplied: false,
+      processing: false
     });
   }
   renderQueue();
@@ -508,6 +569,19 @@ function renderQueue() {
         ${canEdit ? `<button class="queue-item-remove" data-idx="${idx}">✕</button>` : ''}
       </div>
       ${canEdit ? `<input type="text" data-idx="${idx}" value="${item.displayName}" placeholder="nama tampilan di Roblox">` : ''}
+      ${canEdit && item.previewUrl ? `
+        <audio class="preview-audio" data-idx="${idx}" controls preload="metadata" src="${item.previewUrl}"></audio>
+        <div class="speed-row">
+          <span>speed</span>
+          <input type="range" class="speed-slider" data-idx="${idx}" min="0.5" max="1.5" step="0.01" value="${item.speed}">
+          <span class="speed-val" data-speedval="${idx}">${item.speed.toFixed(2)}x</span>
+        </div>
+        <div class="speed-actions">
+          <button class="mini-btn apply-speed-btn ${item.speedApplied ? 'applied' : ''}" data-idx="${idx}" ${item.processing ? 'disabled' : ''}>
+            ${item.processing ? 'memproses...' : (item.speedApplied ? '✓ speed diterapkan' : 'terapkan speed ke file')}
+          </button>
+        </div>
+      ` : ''}
       ${item.status !== 'Queued' ? `
         <div class="queue-item-status">
           <span class="led ${statusClass}"></span>
@@ -521,6 +595,8 @@ function renderQueue() {
 
   queueEl.querySelectorAll('.queue-item-remove').forEach(btn => {
     btn.addEventListener('click', () => {
+      const item = queueFiles[Number(btn.dataset.idx)];
+      if (item && item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       queueFiles.splice(Number(btn.dataset.idx), 1);
       renderQueue();
       uploadBtn.disabled = queueFiles.length === 0;
@@ -533,6 +609,34 @@ function renderQueue() {
   });
   queueEl.querySelectorAll('.recheck-link').forEach(btn => {
     btn.addEventListener('click', () => recheckOne(Number(btn.dataset.idx)));
+  });
+
+  // Slider speed: langsung ubah playbackRate player preview biar bisa
+  // didengar hasilnya real-time sebelum diputuskan mau diterapkan atau tidak.
+  queueEl.querySelectorAll('.speed-slider').forEach(slider => {
+    slider.addEventListener('input', () => {
+      const idx = Number(slider.dataset.idx);
+      const item = queueFiles[idx];
+      const speed = parseFloat(slider.value);
+      item.speed = speed;
+      item.speedApplied = false;
+
+      const audioEl = queueEl.querySelector(`.preview-audio[data-idx="${idx}"]`);
+      if (audioEl) audioEl.playbackRate = speed;
+
+      const label = queueEl.querySelector(`.speed-val[data-speedval="${idx}"]`);
+      if (label) label.textContent = speed.toFixed(2) + 'x';
+
+      const applyBtn = queueEl.querySelector(`.apply-speed-btn[data-idx="${idx}"]`);
+      if (applyBtn) {
+        applyBtn.textContent = 'terapkan speed ke file';
+        applyBtn.classList.remove('applied');
+      }
+    });
+  });
+
+  queueEl.querySelectorAll('.apply-speed-btn').forEach(btn => {
+    btn.addEventListener('click', () => applySpeed(Number(btn.dataset.idx)));
   });
 }
 
@@ -557,6 +661,112 @@ function log(msg) {
   line.textContent = msg;
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+/**
+ * Proses ulang file audio secara nyata (bukan cuma preview) sesuai speed
+ * yang dipilih di slider. Berguna kalau lagu kena tolak moderasi dan mau
+ * dicoba upload ulang dengan tempo yang beda.
+ * Teknis: decode -> render ulang lewat OfflineAudioContext dengan playbackRate
+ * berbeda -> encode balik jadi WAV -> file itu yang dipakai saat upload.
+ */
+async function applySpeed(idx) {
+  const item = queueFiles[idx];
+  if (!item || item.processing) return;
+  if (item.speed === 1) {
+    log(`> ${item.fileName} — speed 1.00x = file asli, tidak perlu diproses`);
+    item.speedApplied = true;
+    renderQueue();
+    return;
+  }
+
+  item.processing = true;
+  renderQueue();
+  log(`> memproses ${item.fileName} ke speed ${item.speed.toFixed(2)}x...`);
+
+  try {
+    const arrayBuffer = await item.file.arrayBuffer();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+
+    const newLength = Math.ceil(decoded.length / item.speed);
+    const offlineCtx = new OfflineAudioContext(decoded.numberOfChannels, newLength, decoded.sampleRate);
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = decoded;
+    source.playbackRate.value = item.speed;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+
+    const rendered = await offlineCtx.startRendering();
+    const wavBlob = audioBufferToWaveBlob(rendered);
+
+    const speedTag = item.speed.toFixed(2) + 'x';
+    const baseName = item.fileName.replace(/\.[^/.]+$/, '');
+    const newFileName = `${baseName}_${speedTag}.wav`;
+    const newFile = new File([wavBlob], newFileName, { type: 'audio/wav' });
+
+    URL.revokeObjectURL(item.previewUrl);
+    item.file = newFile;
+    item.fileName = newFileName;
+    item.fileSize = newFile.size;
+    item.previewUrl = URL.createObjectURL(newFile);
+    item.speedApplied = true;
+    item.processing = false;
+
+    log(`> ${newFileName} siap - dengarkan preview lalu upload seperti biasa`);
+    renderQueue();
+  } catch (err) {
+    item.processing = false;
+    log('> gagal proses speed: ' + err.message);
+    renderQueue();
+  }
+}
+
+/** Encode AudioBuffer jadi WAV (PCM 16-bit) supaya bisa diupload sebagai file audio biasa. */
+function audioBufferToWaveBlob(buffer) {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const numFrames = buffer.length;
+  const bytesPerSample = 2;
+  const blockAlign = numChannels * bytesPerSample;
+  const dataSize = numFrames * blockAlign;
+
+  const arrayBuffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(arrayBuffer);
+
+  function writeString(offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  }
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  const channelData = [];
+  for (let ch = 0; ch < numChannels; ch++) channelData.push(buffer.getChannelData(ch));
+
+  let offset = 44;
+  for (let i = 0; i < numFrames; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      let sample = Math.max(-1, Math.min(1, channelData[ch][i]));
+      sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(offset, sample, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
 }
 
 uploadBtn.addEventListener('click', async () => {
