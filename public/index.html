@@ -478,14 +478,11 @@ const queueEl = document.getElementById('queue');
 const uploadBtn = document.getElementById('uploadBtn');
 const logEl = document.getElementById('log');
 
-// queueFiles: array of { file (File|null kalau dari localStorage), fileName, fileSize,
-// displayName, operationId, status, assetId, error }
+// queueFiles: array of { file, fileName, fileSize, displayName, status, assetId, error }
+// Tidak ada lagi pengecekan moderasi Roblox di sini - status cuma:
+// 'Queued' -> 'Uploading' -> 'Done' (asset id sudah ada) atau 'Error'.
 let queueFiles = [];
 let uploading = false;
-let pollTimer = null;
-let eventSource = null;
-
-const STORAGE_KEY = 'pacalank_upload_queue_v1';
 
 dropzone.addEventListener('click', () => audioFile.click());
 ['dragenter','dragover'].forEach(evt =>
@@ -509,7 +506,6 @@ function addFiles(fileList) {
       fileName: file.name,
       fileSize: file.size,
       displayName: file.name.replace(/\.[^/.]+$/, '').slice(0, 50),
-      operationId: null,
       status: 'Queued',
       assetId: null,
       error: null,
@@ -529,88 +525,6 @@ function formatSize(bytes) {
   return (bytes/1024/1024).toFixed(1) + ' MB';
 }
 
-// Simpan cuma metadata yang ringkas & bisa diserialisasi - File object
-// sengaja TIDAK disimpan (memang tidak bisa disimpan ke localStorage).
-// Ini yang bikin daftar upload tahan direfresh/ditutup tabnya.
-function persistQueue() {
-  const persistable = queueFiles
-    .filter(i => i.operationId) // yang belum keupload (Queued) tak perlu disimpan
-    .map(i => ({
-      operationId: i.operationId,
-      fileName: i.fileName,
-      fileSize: i.fileSize,
-      displayName: i.displayName,
-      status: i.status,
-      assetId: i.assetId,
-      error: i.error
-    }));
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
-  } catch (e) { /* localStorage penuh/nonaktif, abaikan saja */ }
-}
-
-function restoreQueue() {
-  let saved = [];
-  try {
-    saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  } catch (e) { saved = []; }
-  if (saved.length === 0) return;
-
-  queueFiles = saved.map(i => ({ ...i, file: null }));
-  renderQueue();
-  log(`> memulihkan ${saved.length} riwayat upload dari sesi sebelumnya...`);
-
-  // Ambil snapshot status terkini dulu (siapa tahu berubah selagi tab ditutup),
-  // baru setelah itu SSE yang jagain perubahan berikutnya secara realtime.
-  refreshSnapshot();
-}
-
-/**
- * FIX: kalau server balikin 'NotFound' untuk sebuah job (server sempat
- * restart/redeploy dan kehilangan record in-memory-nya), item TIDAK lagi
- * dibiarkan diam dengan status lama. Kalau kita masih punya assetId di
- * localStorage, otomatis coba pulihkan lewat /api/recheck-by-asset tanpa
- * perlu user pencet apa-apa. Kalau assetId juga tidak ada, tandai supaya
- * tombol "cek ulang" manual muncul.
- */
-async function refreshSnapshot() {
-  const ids = queueFiles.filter(i => i.operationId).map(i => i.operationId);
-  if (ids.length === 0) return;
-  try {
-    const res = await fetch('/api/status-batch?ids=' + ids.join(','));
-    const data = await res.json();
-
-    const orphaned = []; // job yang sudah dilupa server tapi kita masih punya catatannya
-
-    queueFiles.forEach(item => {
-      const job = data[item.operationId];
-      if (job && job.status !== 'NotFound') {
-        item.status = job.status;
-        item.assetId = job.assetId;
-        item.error = job.error;
-      } else if (job && job.status === 'NotFound') {
-        orphaned.push(item);
-      }
-    });
-    renderQueue();
-    persistQueue();
-
-    for (const item of orphaned) {
-      if (item.assetId) {
-        log(`> ${item.fileName} — server kehilangan riwayat, memulihkan via asset id ${item.assetId}...`);
-        await recheckByAssetId(item);
-      } else {
-        item.status = 'AwaitingManualRecheck';
-        item.error = 'Server kehilangan riwayat job ini dan belum ada asset id, klik "cek ulang" untuk coba lagi';
-        renderQueue();
-        persistQueue();
-      }
-    }
-  } catch (e) {
-    log('> gagal ambil status terakhir: ' + e.message);
-  }
-}
-
 function renderQueue() {
   queueEl.innerHTML = '';
   queueFiles.forEach((item, idx) => {
@@ -620,12 +534,6 @@ function renderQueue() {
     const statusClass = statusToClass(item.status);
     const statusLabel = statusToLabel(item);
     const canEdit = !uploading && item.status === 'Queued';
-
-    // FIX: tombol "cek ulang" sekarang juga muncul saat status masih
-    // 'Pending', bukan cuma 'AwaitingManualRecheck'. Sebelumnya kalau job
-    // nyangkut di Pending (misal karena server lupa job-nya), user sama
-    // sekali tidak punya cara memicu recheck manual dari UI.
-    const showRecheck = item.status === 'AwaitingManualRecheck' || item.status === 'Pending';
 
     div.innerHTML = `
       <div class="queue-item-row">
@@ -651,7 +559,6 @@ function renderQueue() {
         <div class="queue-item-status">
           <span class="led ${statusClass}"></span>
           <span class="status-text ${statusClass}">${statusLabel}</span>
-          ${showRecheck ? `<button class="recheck-link" data-idx="${idx}">cek ulang</button>` : ''}
         </div>
       ` : ''}
     `;
@@ -672,10 +579,6 @@ function renderQueue() {
       queueFiles[Number(inp.dataset.idx)].displayName = inp.value;
     });
   });
-  queueEl.querySelectorAll('.recheck-link').forEach(btn => {
-    btn.addEventListener('click', () => recheckOne(Number(btn.dataset.idx)));
-  });
-
   // Slider speed: langsung ubah playbackRate player preview biar bisa
   // didengar hasilnya real-time sebelum diputuskan mau diterapkan atau tidak.
   queueEl.querySelectorAll('.speed-slider').forEach(slider => {
@@ -706,17 +609,14 @@ function renderQueue() {
 }
 
 function statusToClass(status) {
-  if (status === 'Approved') return 'approved';
-  if (status === 'Rejected' || status === 'Error') return 'error';
-  if (status === 'AwaitingManualRecheck') return 'waiting';
-  return 'pending';
+  if (status === 'Done') return 'approved';
+  if (status === 'Error') return 'error';
+  return 'pending'; // Uploading
 }
 function statusToLabel(item) {
-  if (item.status === 'Approved') return `lolos — asset id: ${item.assetId}`;
-  if (item.status === 'Rejected') return `ditolak — ${item.error || 'moderasi Roblox'}${item.assetId ? ' (asset id: ' + item.assetId + ')' : ''}`;
+  if (item.status === 'Done') return `selesai — asset id: ${item.assetId}`;
   if (item.status === 'Error') return `error — ${item.error || 'unknown'}`;
-  if (item.status === 'AwaitingManualRecheck') return `auto-check berhenti sementara, masih diproses roblox${item.assetId ? ' (asset id: ' + item.assetId + ')' : ''}`;
-  if (item.status === 'Pending') return `menunggu moderasi roblox...${item.assetId ? ' (asset id: ' + item.assetId + ')' : ' (asset belum dibuat)'}`;
+  if (item.status === 'Uploading') return `mengupload ke roblox...`;
   return item.status;
 }
 
@@ -837,6 +737,8 @@ uploadBtn.addEventListener('click', async () => {
   uploading = true;
   uploadBtn.disabled = true;
   uploadBtn.textContent = 'uploading...';
+  pending.forEach(item => { item.status = 'Uploading'; });
+  renderQueue();
   log(`> mengirim ${pending.length} file ke roblox open cloud...`);
 
   const formData = new FormData();
@@ -844,136 +746,42 @@ uploadBtn.addEventListener('click', async () => {
   formData.append('displayNames', JSON.stringify(pending.map(i => i.displayName)));
 
   try {
+    // Request ini menunggu sampai Roblox selesai MEMBUAT asset object-nya
+    // (bukan menunggu moderasi) - begitu selesai, assetId langsung dibalikin.
     const res = await fetch('/api/upload-batch', { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Upload gagal');
 
     data.uploaded.forEach(u => {
-      const item = pending.find(i => i.fileName === u.fileName && !i.operationId);
+      const item = pending.find(i => i.fileName === u.fileName);
       if (item) {
-        item.operationId = u.operationId;
-        item.status = 'Pending';
+        item.status = 'Done';
+        item.assetId = u.assetId;
       }
     });
     data.failed.forEach(f => {
-      const item = pending.find(i => i.fileName === f.fileName && !i.operationId);
+      const item = pending.find(i => i.fileName === f.fileName);
       if (item) {
         item.status = 'Error';
         item.error = f.error;
       }
     });
 
-    log(`> ${data.uploaded.length} file diterima roblox, ${data.failed.length} gagal terkirim`);
+    log(`> ${data.uploaded.length} file selesai, ${data.failed.length} gagal`);
     renderQueue();
-    persistQueue();
     uploading = false;
     uploadBtn.disabled = queueFiles.some(i => i.status === 'Queued') === false;
     uploadBtn.textContent = 'upload --batch';
   } catch (err) {
     log('> gagal upload batch: ' + err.message);
+    pending.forEach(item => { if (item.status === 'Uploading') item.status = 'Error'; item.error = err.message; });
+    renderQueue();
     uploading = false;
     uploadBtn.disabled = false;
     uploadBtn.textContent = 'upload --batch';
   }
 });
 
-/**
- * REALTIME: satu koneksi SSE yang dengar SEMUA perubahan status dari server.
- * Begitu Roblox/Studio selesai moderasi (approved/ditolak), server langsung
- * dorong event ini - tidak perlu nunggu giliran polling lagi.
- */
-function connectRealtime() {
-  if (eventSource) eventSource.close();
-  eventSource = new EventSource('/api/events');
-
-  eventSource.onmessage = (e) => {
-    let payload;
-    try { payload = JSON.parse(e.data); } catch (err) { return; }
-
-    const item = queueFiles.find(i => i.operationId === payload.operationId);
-    if (!item) return; // update buat job yang tidak lagi kita lacak di tab ini
-
-    const changed = item.status !== payload.status || item.assetId !== payload.assetId;
-    if (changed) {
-      if (payload.status === 'Approved') log(`> ${item.fileName} — lolos moderasi (asset id ${payload.assetId})`);
-      if (payload.status === 'Rejected') log(`> ${item.fileName} — ditolak moderasi roblox`);
-      if (payload.status === 'AwaitingManualRecheck') log(`> ${item.fileName} — auto-check berhenti, cek ulang manual kalau perlu`);
-    }
-
-    item.status = payload.status;
-    item.assetId = payload.assetId;
-    item.error = payload.error;
-
-    renderQueue();
-    persistQueue();
-  };
-
-  eventSource.onerror = () => {
-    // Browser otomatis reconnect EventSource sendiri, cukup catat di log.
-    log('> koneksi realtime terputus, mencoba menyambung ulang...');
-  };
-}
-
-/**
- * FIX: sekarang mengirim assetId yang tersimpan di client sebagai fallback -
- * kalau server sudah tidak punya record job ini (habis restart), server bisa
- * membuat ulang job-nya dari assetId ini alih-alih balikin 404.
- */
-async function recheckOne(idx) {
-  const item = queueFiles[idx];
-  if (!item || !item.operationId) return;
-  log(`> cek ulang manual: ${item.fileName}`);
-
-  try {
-    const res = await fetch(`/api/recheck/${item.operationId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assetId: item.assetId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Recheck gagal');
-
-    item.status = data.status;
-    item.assetId = data.assetId;
-    item.error = data.error;
-    renderQueue();
-    persistQueue();
-  } catch (err) {
-    log('> gagal cek ulang: ' + err.message);
-  }
-}
-
-/**
- * FIX BARU: dipanggil otomatis dari refreshSnapshot() saat server sudah
- * sama sekali tidak punya record job ini, tapi kita masih punya assetId-nya
- * di localStorage. Memulihkan status tanpa perlu user pencet apa-apa.
- */
-async function recheckByAssetId(item) {
-  try {
-    const res = await fetch(`/api/recheck-by-asset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operationId: item.operationId, assetId: item.assetId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Recheck gagal');
-
-    item.status = data.status;
-    item.assetId = data.assetId;
-    item.error = data.error;
-    renderQueue();
-    persistQueue();
-  } catch (err) {
-    item.status = 'AwaitingManualRecheck';
-    item.error = 'Gagal memulihkan otomatis: ' + err.message;
-    renderQueue();
-    persistQueue();
-  }
-}
-
-// Boot: sambungkan realtime dulu, baru pulihkan riwayat upload kalau ada.
-connectRealtime();
-restoreQueue();
 </script>
 
 </body>
