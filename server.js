@@ -4,6 +4,7 @@ const multer = require('multer');
 const axios = require('axios');
 const FormData = require('form-data');
 const path = require('path');
+const { EventEmitter } = require('events');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -16,15 +17,29 @@ const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-// In-memory job store: operationId -> { status, assetId, error, displayName, operationPath }
+// In-memory job store: operationId -> { status, assetId, error, displayName, fileName, operationPath }
 const jobs = {};
+
+// Dipakai buat siaran (broadcast) tiap kali status job berubah, supaya semua
+// tab yang lagi buka bisa update REALTIME tanpa harus nanya-nanya (polling).
+const jobEvents = new EventEmitter();
+jobEvents.setMaxListeners(0);
 
 const MAX_ATTEMPTS = 360; // 30 menit di 5s interval sebelum auto-poll berhenti sementara
 const POLL_INTERVAL_MS = 5000;
 
 /**
+ * Satu-satunya tempat yang boleh mengubah isi job. Setiap perubahan langsung
+ * disiarkan ke semua client yang lagi dengar lewat SSE (/api/events).
+ */
+function updateJob(operationId, patch) {
+  if (!jobs[operationId]) return;
+  Object.assign(jobs[operationId], patch);
+  jobEvents.emit('update', { operationId, ...jobs[operationId] });
+}
+
+/**
  * STEP 1: Upload SATU FILE ke Roblox Open Cloud, kembalikan operation id.
- * Dipakai secara internal oleh /api/upload-batch untuk tiap file.
  */
 async function uploadOneFile(file, displayNameRaw) {
   const displayName = (displayNameRaw || file.originalname || 'Untitled Audio').slice(0, 50);
@@ -66,6 +81,7 @@ async function uploadOneFile(file, displayNameRaw) {
     fileName: file.originalname,
     operationPath
   };
+  jobEvents.emit('update', { operationId, ...jobs[operationId] });
 
   pollRobloxStatus(operationId, operationPath);
 
@@ -73,9 +89,7 @@ async function uploadOneFile(file, displayNameRaw) {
 }
 
 /**
- * STEP 1 (BATCH): Terima banyak file sekaligus. Tiap file diupload independen
- * ke Roblox (satu request per file, karena API Roblox memang per-asset),
- * lalu masing-masing dapat operationId & job sendiri.
+ * STEP 1 (BATCH): Terima banyak file sekaligus, upload berurutan ke Roblox.
  */
 app.post('/api/upload-batch', upload.array('audio', 25), async (req, res) => {
   try {
@@ -86,7 +100,6 @@ app.post('/api/upload-batch', upload.array('audio', 25), async (req, res) => {
       return res.status(400).json({ error: 'Tidak ada file audio yang dikirim' });
     }
 
-    // displayNames dikirim sebagai JSON array string, urutannya sejajar dengan req.files
     let displayNames = [];
     try {
       displayNames = JSON.parse(req.body.displayNames || '[]');
@@ -97,8 +110,6 @@ app.post('/api/upload-batch', upload.array('audio', 25), async (req, res) => {
     const results = [];
     const errors = [];
 
-    // Upload berurutan (bukan Promise.all) supaya tidak membanjiri Roblox API
-    // sekaligus dan gampang dilacak kalau salah satu gagal duluan.
     for (let i = 0; i < req.files.length; i++) {
       try {
         const result = await uploadOneFile(req.files[i], displayNames[i]);
@@ -134,45 +145,42 @@ async function pollRobloxStatus(operationId, operationPath, attempt = 0) {
     if (data.done) {
       if (data.response && data.response.assetId) {
         const assetId = data.response.assetId;
-        jobs[operationId].assetId = assetId;
-
         const moderationState = data.response.moderationResult?.moderationState;
 
         if (moderationState === 'MODERATION_STATE_APPROVED') {
-          jobs[operationId].status = 'Approved';
+          updateJob(operationId, { status: 'Approved', assetId });
         } else if (moderationState === 'MODERATION_STATE_REJECTED') {
-          jobs[operationId].status = 'Rejected';
-          jobs[operationId].error = 'Ditolak moderasi Roblox';
+          updateJob(operationId, { status: 'Rejected', assetId, error: 'Ditolak moderasi Roblox' });
         } else {
-          jobs[operationId].status = 'Pending';
+          updateJob(operationId, { status: 'Pending', assetId });
           pollAssetModeration(operationId, assetId);
         }
       } else if (data.error) {
-        jobs[operationId].status = 'Rejected';
-        jobs[operationId].error = data.error.message || 'Ditolak moderasi Roblox';
+        updateJob(operationId, { status: 'Rejected', error: data.error.message || 'Ditolak moderasi Roblox' });
       } else {
-        jobs[operationId].status = 'Rejected';
-        jobs[operationId].error = 'Moderasi selesai tapi tidak ada assetId';
+        updateJob(operationId, { status: 'Rejected', error: 'Moderasi selesai tapi tidak ada assetId' });
       }
       return;
     }
 
     if (attempt >= MAX_ATTEMPTS) {
-      jobs[operationId].status = 'AwaitingManualRecheck';
-      jobs[operationId].error = 'Auto-check dihentikan sementara, klik "Cek ulang status" untuk lanjut cek manual';
+      updateJob(operationId, {
+        status: 'AwaitingManualRecheck',
+        error: 'Auto-check dihentikan sementara, klik "Cek ulang status" untuk lanjut cek manual'
+      });
       return;
     }
 
     setTimeout(() => pollRobloxStatus(operationId, operationPath, attempt + 1), POLL_INTERVAL_MS);
   } catch (err) {
-    jobs[operationId].status = 'Error';
-    jobs[operationId].error = err.response?.data?.message || err.message;
+    updateJob(operationId, { status: 'Error', error: err.response?.data?.message || err.message });
   }
 }
 
 /**
- * STEP 2b: Setelah asset ada, terus cek verdict moderasi aslinya
- * (moderationResult.moderationState) sampai settle jadi Approved/Rejected.
+ * STEP 2b: Setelah asset ada, terus cek verdict moderasi aslinya sampai settle.
+ * Ini bagian yang paling sering diakses - dipakai buat mastiin status Approved/Rejected
+ * ke-detect secepat mungkin lalu langsung disiarkan lewat SSE.
  */
 async function pollAssetModeration(operationId, assetId, attempt = 0) {
   try {
@@ -183,31 +191,30 @@ async function pollAssetModeration(operationId, assetId, attempt = 0) {
     const moderationState = assetRes.data.moderationResult?.moderationState;
 
     if (moderationState === 'MODERATION_STATE_APPROVED') {
-      jobs[operationId].status = 'Approved';
-      jobs[operationId].assetId = assetId;
+      updateJob(operationId, { status: 'Approved', assetId });
       return;
     }
     if (moderationState === 'MODERATION_STATE_REJECTED') {
-      jobs[operationId].status = 'Rejected';
-      jobs[operationId].error = 'Ditolak moderasi Roblox';
+      updateJob(operationId, { status: 'Rejected', assetId, error: 'Ditolak moderasi Roblox' });
       return;
     }
 
     if (attempt >= MAX_ATTEMPTS) {
-      jobs[operationId].status = 'AwaitingManualRecheck';
-      jobs[operationId].error = 'Auto-check dihentikan sementara, klik "Cek ulang status" untuk lanjut cek manual';
+      updateJob(operationId, {
+        status: 'AwaitingManualRecheck',
+        error: 'Auto-check dihentikan sementara, klik "Cek ulang status" untuk lanjut cek manual'
+      });
       return;
     }
 
     setTimeout(() => pollAssetModeration(operationId, assetId, attempt + 1), POLL_INTERVAL_MS);
   } catch (err) {
-    jobs[operationId].status = 'Error';
-    jobs[operationId].error = err.response?.data?.message || err.message;
+    updateJob(operationId, { status: 'Error', error: err.response?.data?.message || err.message });
   }
 }
 
 /**
- * STEP 3: Client polling status satu job.
+ * STEP 3: Client polling status satu job (dipakai sebagai fallback / snapshot awal).
  */
 app.get('/api/status/:operationId', (req, res) => {
   const job = jobs[req.params.operationId];
@@ -216,8 +223,8 @@ app.get('/api/status/:operationId', (req, res) => {
 });
 
 /**
- * STEP 3b (BATCH): Client polling status banyak job sekaligus lewat query string
- * ?ids=id1,id2,id3 supaya tidak perlu N request terpisah tiap tick.
+ * STEP 3b (BATCH): Snapshot status banyak job sekaligus - dipakai sekali saat
+ * halaman baru dibuka/direfresh untuk tahu status TERKINI sebelum SSE nyambung.
  */
 app.get('/api/status-batch', (req, res) => {
   const ids = (req.query.ids || '').split(',').filter(Boolean);
@@ -226,6 +233,35 @@ app.get('/api/status-batch', (req, res) => {
     result[id] = jobs[id] || { status: 'NotFound', error: 'Job tidak ditemukan' };
   }
   res.json(result);
+});
+
+/**
+ * STEP 3c (REALTIME): Server-Sent Events. Client buka satu koneksi ini sekali,
+ * lalu setiap kali ADA job yang statusnya berubah (approved/rejected/dsb),
+ * server langsung dorong (push) datanya - client TIDAK perlu nanya berkala lagi.
+ * Ini yang bikin update di web sinkron sama kondisi asli di Roblox/Studio.
+ */
+app.get('/api/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+  res.write('retry: 3000\n\n');
+
+  const onUpdate = (payload) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  jobEvents.on('update', onUpdate);
+
+  // Keep-alive comment tiap 20 detik supaya koneksi tidak ditutup paksa
+  // oleh proxy/hosting (mis. Railway) yang punya idle timeout.
+  const keepAlive = setInterval(() => res.write(': ping\n\n'), 20000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    jobEvents.off('update', onUpdate);
+  });
 });
 
 /**
@@ -244,14 +280,11 @@ app.post('/api/recheck/:operationId', async (req, res) => {
       const moderationState = assetRes.data.moderationResult?.moderationState;
 
       if (moderationState === 'MODERATION_STATE_APPROVED') {
-        job.status = 'Approved';
-        job.error = null;
+        updateJob(operationId, { status: 'Approved', error: null });
       } else if (moderationState === 'MODERATION_STATE_REJECTED') {
-        job.status = 'Rejected';
-        job.error = 'Ditolak moderasi Roblox';
+        updateJob(operationId, { status: 'Rejected', error: 'Ditolak moderasi Roblox' });
       } else {
-        job.status = 'Pending';
-        job.error = null;
+        updateJob(operationId, { status: 'Pending', error: null });
         pollAssetModeration(operationId, job.assetId);
       }
     } else if (job.operationPath) {
@@ -261,24 +294,20 @@ app.post('/api/recheck/:operationId', async (req, res) => {
       const data = statusRes.data;
 
       if (data.done && data.response?.assetId) {
-        job.assetId = data.response.assetId;
-        job.status = 'Pending';
-        job.error = null;
-        pollAssetModeration(operationId, job.assetId);
+        updateJob(operationId, { assetId: data.response.assetId, status: 'Pending', error: null });
+        pollAssetModeration(operationId, data.response.assetId);
       } else {
-        job.status = 'Pending';
-        job.error = null;
+        updateJob(operationId, { status: 'Pending', error: null });
         pollRobloxStatus(operationId, job.operationPath);
       }
     } else {
       return res.status(400).json({ error: 'Job tidak punya operationPath maupun assetId, tidak bisa di-recheck' });
     }
 
-    res.json(job);
+    res.json(jobs[operationId]);
   } catch (err) {
-    job.status = 'Error';
-    job.error = err.response?.data?.message || err.message;
-    res.status(500).json(job);
+    updateJob(operationId, { status: 'Error', error: err.response?.data?.message || err.message });
+    res.status(500).json(jobs[operationId]);
   }
 });
 
