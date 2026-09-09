@@ -498,6 +498,32 @@
     background: rgba(61,255,168,0.08);
   }
 
+  .copy-all-row {
+    margin-top: 8px;
+  }
+  .copy-all-btn {
+    width: 100%;
+    background: rgba(178,107,255,0.1);
+    border: 1px solid var(--line-dim);
+    color: var(--violet-bright);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 7px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    margin: 0;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .copy-all-btn:hover {
+    border-color: var(--violet);
+    background: rgba(178,107,255,0.18);
+  }
+  .copy-all-btn.copied {
+    border-color: var(--ok);
+    color: var(--ok);
+    background: rgba(61,255,168,0.08);
+  }
+
   /* --- Footer --- */
   .footer {
     text-align: center;
@@ -580,8 +606,6 @@
   const ctx = canvas.getContext('2d');
   let cols, drops, fontSize = 15;
 
-  // Karakter hujan diambil dari nama "PACALANK" sendiri, jadi background
-  // keliatan hacker-style tapi tetap kebaca identitas komunitasnya.
   const chars = 'PACALANK';
 
   function resize() {
@@ -604,7 +628,6 @@
       const x = i * fontSize;
       const y = drops[i] * fontSize;
 
-      // kepala tetesan lebih terang, ekor lebih redup ungu
       const isHead = Math.random() > 0.94;
       ctx.fillStyle = isHead ? '#d9aeff' : 'rgba(178, 107, 255, 0.55)';
       ctx.fillText(char, x, y);
@@ -632,9 +655,6 @@ const historyList = document.getElementById('historyList');
 const HISTORY_KEY = 'pacalank_upload_history_v1';
 const MAX_HISTORY = 100;
 
-// queueFiles: array of { file, fileName, fileSize, displayName, status, assetId, error }
-// Tidak ada lagi pengecekan moderasi Roblox di sini - status cuma:
-// 'Queued' -> 'Uploading' -> 'Done' (asset id sudah ada) atau 'Error'.
 let queueFiles = [];
 let uploading = false;
 
@@ -679,11 +699,6 @@ function formatSize(bytes) {
   return (bytes/1024/1024).toFixed(1) + ' MB';
 }
 
-/**
- * RIWAYAT UPLOAD: setiap file yang selesai diupload (dapat asset id) dicatat
- * ke localStorage, supaya nama lagu & asset id-nya bisa dilihat/disalin lagi
- * kapan saja meski tab ditutup atau di-refresh.
- */
 function loadHistory() {
   try {
     return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
@@ -694,7 +709,7 @@ function loadHistory() {
 
 function saveToHistory(entry) {
   const history = loadHistory();
-  history.unshift({ ...entry, time: Date.now() }); // yang terbaru di paling atas
+  history.unshift({ ...entry, time: Date.now() });
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
   } catch (e) { /* localStorage penuh/nonaktif, abaikan saja */ }
@@ -721,21 +736,26 @@ function renderHistory() {
       <div class="history-item-row">
         <span class="history-item-label">nama</span>
         <span class="history-item-value">${entry.displayName}</span>
-        <button class="copy-btn" data-copy="${encodeURIComponent(entry.displayName)}" data-idx="${idx}" data-field="name">salin</button>
       </div>
       <div class="history-item-row">
         <span class="history-item-label">id</span>
         <span class="history-item-value">${entry.assetId}</span>
-        <button class="copy-btn" data-copy="${encodeURIComponent(entry.assetId)}" data-idx="${idx}" data-field="id">salin</button>
       </div>
       <div class="history-item-row">
         <span class="history-item-label" style="width:auto;font-size:10px;">${formatHistoryTime(entry.time)}</span>
       </div>
+      <div class="copy-all-row">
+        <button class="copy-all-btn" data-idx="${idx}" data-name="${encodeURIComponent(entry.displayName)}" data-id="${encodeURIComponent(entry.assetId)}">salin nama + id</button>
+      </div>
     </div>
   `).join('');
 
-  historyList.querySelectorAll('.copy-btn').forEach(btn => {
-    btn.addEventListener('click', () => copyToClipboard(decodeURIComponent(btn.dataset.copy), btn));
+  historyList.querySelectorAll('.copy-all-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const name = decodeURIComponent(btn.dataset.name);
+      const id = decodeURIComponent(btn.dataset.id);
+      copyToClipboard(`${name} - ${id}`, btn);
+    });
   });
 }
 
@@ -743,7 +763,6 @@ async function copyToClipboard(text, btn) {
   try {
     await navigator.clipboard.writeText(text);
   } catch (e) {
-    // fallback buat browser lama / konteks non-https
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -781,16 +800,6 @@ function renderQueue() {
       ${canEdit ? `<input type="text" data-idx="${idx}" value="${item.displayName}" placeholder="nama tampilan di Roblox">` : ''}
       ${canEdit && item.previewUrl ? `
         <audio class="preview-audio" data-idx="${idx}" controls preload="metadata" src="${item.previewUrl}"></audio>
-        <div class="speed-row">
-          <span>speed</span>
-          <input type="range" class="speed-slider" data-idx="${idx}" min="0.5" max="1.5" step="0.01" value="${item.speed}">
-          <span class="speed-val" data-speedval="${idx}">${item.speed.toFixed(2)}x</span>
-        </div>
-        <div class="speed-actions">
-          <button class="mini-btn apply-speed-btn ${item.speedApplied ? 'applied' : ''}" data-idx="${idx}" ${item.processing ? 'disabled' : ''}>
-            ${item.processing ? 'memproses...' : (item.speedApplied ? '✓ speed diterapkan' : 'terapkan speed ke file')}
-          </button>
-        </div>
       ` : ''}
       ${item.status !== 'Queued' ? `
         <div class="queue-item-status">
@@ -816,39 +825,12 @@ function renderQueue() {
       queueFiles[Number(inp.dataset.idx)].displayName = inp.value;
     });
   });
-  // Slider speed: langsung ubah playbackRate player preview biar bisa
-  // didengar hasilnya real-time sebelum diputuskan mau diterapkan atau tidak.
-  queueEl.querySelectorAll('.speed-slider').forEach(slider => {
-    slider.addEventListener('input', () => {
-      const idx = Number(slider.dataset.idx);
-      const item = queueFiles[idx];
-      const speed = parseFloat(slider.value);
-      item.speed = speed;
-      item.speedApplied = false;
-
-      const audioEl = queueEl.querySelector(`.preview-audio[data-idx="${idx}"]`);
-      if (audioEl) audioEl.playbackRate = speed;
-
-      const label = queueEl.querySelector(`.speed-val[data-speedval="${idx}"]`);
-      if (label) label.textContent = speed.toFixed(2) + 'x';
-
-      const applyBtn = queueEl.querySelector(`.apply-speed-btn[data-idx="${idx}"]`);
-      if (applyBtn) {
-        applyBtn.textContent = 'terapkan speed ke file';
-        applyBtn.classList.remove('applied');
-      }
-    });
-  });
-
-  queueEl.querySelectorAll('.apply-speed-btn').forEach(btn => {
-    btn.addEventListener('click', () => applySpeed(Number(btn.dataset.idx)));
-  });
 }
 
 function statusToClass(status) {
   if (status === 'Done') return 'approved';
   if (status === 'Error') return 'error';
-  return 'pending'; // Uploading
+  return 'pending';
 }
 function statusToLabel(item) {
   if (item.status === 'Done') return `selesai — asset id: ${item.assetId}`;
@@ -863,109 +845,6 @@ function log(msg) {
   line.textContent = msg;
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
-}
-
-/**
- * Proses ulang file audio secara nyata (bukan cuma preview) sesuai speed
- * yang dipilih di slider. Berguna kalau lagu kena tolak moderasi dan mau
- * dicoba upload ulang dengan tempo yang beda.
- * Teknis: decode -> render ulang lewat OfflineAudioContext dengan playbackRate
- * berbeda -> encode balik jadi WAV -> file itu yang dipakai saat upload.
- */
-async function applySpeed(idx) {
-  const item = queueFiles[idx];
-  if (!item || item.processing) return;
-  if (item.speed === 1) {
-    log(`> ${item.fileName} — speed 1.00x = file asli, tidak perlu diproses`);
-    item.speedApplied = true;
-    renderQueue();
-    return;
-  }
-
-  item.processing = true;
-  renderQueue();
-  log(`> memproses ${item.fileName} ke speed ${item.speed.toFixed(2)}x...`);
-
-  try {
-    const arrayBuffer = await item.file.arrayBuffer();
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
-
-    const newLength = Math.ceil(decoded.length / item.speed);
-    const offlineCtx = new OfflineAudioContext(decoded.numberOfChannels, newLength, decoded.sampleRate);
-
-    const source = offlineCtx.createBufferSource();
-    source.buffer = decoded;
-    source.playbackRate.value = item.speed;
-    source.connect(offlineCtx.destination);
-    source.start(0);
-
-    const rendered = await offlineCtx.startRendering();
-    const mp3Blob = audioBufferToMp3Blob(rendered, 128);
-
-    const speedTag = item.speed.toFixed(2) + 'x';
-    const baseName = item.fileName.replace(/\.[^/.]+$/, '');
-    const newFileName = `${baseName}_${speedTag}.mp3`;
-    const newFile = new File([mp3Blob], newFileName, { type: 'audio/mpeg' });
-
-    URL.revokeObjectURL(item.previewUrl);
-    item.file = newFile;
-    item.fileName = newFileName;
-    item.fileSize = newFile.size;
-    item.previewUrl = URL.createObjectURL(newFile);
-    item.speedApplied = true;
-    item.processing = false;
-
-    log(`> ${newFileName} siap - dengarkan preview lalu upload seperti biasa`);
-    renderQueue();
-  } catch (err) {
-    item.processing = false;
-    log('> gagal proses speed: ' + err.message);
-    renderQueue();
-  }
-}
-
-/**
- * Encode AudioBuffer jadi MP3 (bukan WAV) pakai lamejs, supaya ukuran file
- * hasil proses speed tetap kecil - sama seperti file MP3 asli, bukan
- * uncompressed PCM yang bisa berkali-kali lipat lebih besar.
- */
-function audioBufferToMp3Blob(buffer, kbps = 128) {
-  const numChannels = Math.min(buffer.numberOfChannels, 2); // lamejs max 2 channel
-  const sampleRate = buffer.sampleRate;
-  const encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps);
-
-  const left = floatTo16BitPCM(buffer.getChannelData(0));
-  const right = numChannels > 1 ? floatTo16BitPCM(buffer.getChannelData(1)) : null;
-
-  const chunks = [];
-  const sampleBlockSize = 1152; // ukuran frame standar mp3
-
-  for (let i = 0; i < left.length; i += sampleBlockSize) {
-    const leftChunk = left.subarray(i, i + sampleBlockSize);
-    let mp3buf;
-    if (right) {
-      const rightChunk = right.subarray(i, i + sampleBlockSize);
-      mp3buf = encoder.encodeBuffer(leftChunk, rightChunk);
-    } else {
-      mp3buf = encoder.encodeBuffer(leftChunk);
-    }
-    if (mp3buf.length > 0) chunks.push(new Uint8Array(mp3buf));
-  }
-
-  const finalBuf = encoder.flush();
-  if (finalBuf.length > 0) chunks.push(new Uint8Array(finalBuf));
-
-  return new Blob(chunks, { type: 'audio/mpeg' });
-}
-
-function floatTo16BitPCM(floatArray) {
-  const out = new Int16Array(floatArray.length);
-  for (let i = 0; i < floatArray.length; i++) {
-    let s = Math.max(-1, Math.min(1, floatArray[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out;
 }
 
 uploadBtn.addEventListener('click', async () => {
@@ -983,8 +862,6 @@ uploadBtn.addEventListener('click', async () => {
   formData.append('displayNames', JSON.stringify(pending.map(i => i.displayName)));
 
   try {
-    // Request ini menunggu sampai Roblox selesai MEMBUAT asset object-nya
-    // (bukan menunggu moderasi) - begitu selesai, assetId langsung dibalikin.
     const res = await fetch('/api/upload-batch', { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Upload gagal');
@@ -1020,7 +897,6 @@ uploadBtn.addEventListener('click', async () => {
   }
 });
 
-// Boot: tampilkan riwayat upload yang tersimpan (kalau ada).
 renderHistory();
 
 </script>
