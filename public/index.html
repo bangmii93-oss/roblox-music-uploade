@@ -95,6 +95,14 @@
     margin: 6px 0 0;
   }
 
+  .brand-dedication {
+    font-size: 13px;
+    color: var(--violet-bright);
+    letter-spacing: 0.15em;
+    margin: 10px 0 0;
+    text-shadow: 0 0 8px rgba(178,107,255,0.7);
+  }
+
   .term {
     max-width: 560px;
     margin: 0 auto;
@@ -383,6 +391,7 @@
 <div class="brand">
   <p class="brand-name">PACALANK COMMUNITY</p>
   <p class="brand-tag">ROBLOX AUDIO UPLOAD TERMINAL</p>
+  <p class="brand-dedication">Annisa❤</p>
 </div>
 
 <div class="term">
@@ -556,22 +565,47 @@ function restoreQueue() {
   refreshSnapshot();
 }
 
+/**
+ * FIX: kalau server balikin 'NotFound' untuk sebuah job (server sempat
+ * restart/redeploy dan kehilangan record in-memory-nya), item TIDAK lagi
+ * dibiarkan diam dengan status lama. Kalau kita masih punya assetId di
+ * localStorage, otomatis coba pulihkan lewat /api/recheck-by-asset tanpa
+ * perlu user pencet apa-apa. Kalau assetId juga tidak ada, tandai supaya
+ * tombol "cek ulang" manual muncul.
+ */
 async function refreshSnapshot() {
   const ids = queueFiles.filter(i => i.operationId).map(i => i.operationId);
   if (ids.length === 0) return;
   try {
     const res = await fetch('/api/status-batch?ids=' + ids.join(','));
     const data = await res.json();
+
+    const orphaned = []; // job yang sudah dilupa server tapi kita masih punya catatannya
+
     queueFiles.forEach(item => {
       const job = data[item.operationId];
       if (job && job.status !== 'NotFound') {
         item.status = job.status;
         item.assetId = job.assetId;
         item.error = job.error;
+      } else if (job && job.status === 'NotFound') {
+        orphaned.push(item);
       }
     });
     renderQueue();
     persistQueue();
+
+    for (const item of orphaned) {
+      if (item.assetId) {
+        log(`> ${item.fileName} — server kehilangan riwayat, memulihkan via asset id ${item.assetId}...`);
+        await recheckByAssetId(item);
+      } else {
+        item.status = 'AwaitingManualRecheck';
+        item.error = 'Server kehilangan riwayat job ini dan belum ada asset id, klik "cek ulang" untuk coba lagi';
+        renderQueue();
+        persistQueue();
+      }
+    }
   } catch (e) {
     log('> gagal ambil status terakhir: ' + e.message);
   }
@@ -586,6 +620,12 @@ function renderQueue() {
     const statusClass = statusToClass(item.status);
     const statusLabel = statusToLabel(item);
     const canEdit = !uploading && item.status === 'Queued';
+
+    // FIX: tombol "cek ulang" sekarang juga muncul saat status masih
+    // 'Pending', bukan cuma 'AwaitingManualRecheck'. Sebelumnya kalau job
+    // nyangkut di Pending (misal karena server lupa job-nya), user sama
+    // sekali tidak punya cara memicu recheck manual dari UI.
+    const showRecheck = item.status === 'AwaitingManualRecheck' || item.status === 'Pending';
 
     div.innerHTML = `
       <div class="queue-item-row">
@@ -611,7 +651,7 @@ function renderQueue() {
         <div class="queue-item-status">
           <span class="led ${statusClass}"></span>
           <span class="status-text ${statusClass}">${statusLabel}</span>
-          ${item.status === 'AwaitingManualRecheck' ? `<button class="recheck-link" data-idx="${idx}">cek ulang</button>` : ''}
+          ${showRecheck ? `<button class="recheck-link" data-idx="${idx}">cek ulang</button>` : ''}
         </div>
       ` : ''}
     `;
@@ -874,13 +914,22 @@ function connectRealtime() {
   };
 }
 
+/**
+ * FIX: sekarang mengirim assetId yang tersimpan di client sebagai fallback -
+ * kalau server sudah tidak punya record job ini (habis restart), server bisa
+ * membuat ulang job-nya dari assetId ini alih-alih balikin 404.
+ */
 async function recheckOne(idx) {
   const item = queueFiles[idx];
   if (!item || !item.operationId) return;
   log(`> cek ulang manual: ${item.fileName}`);
 
   try {
-    const res = await fetch(`/api/recheck/${item.operationId}`, { method: 'POST' });
+    const res = await fetch(`/api/recheck/${item.operationId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: item.assetId })
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Recheck gagal');
 
@@ -894,6 +943,34 @@ async function recheckOne(idx) {
   }
 }
 
+/**
+ * FIX BARU: dipanggil otomatis dari refreshSnapshot() saat server sudah
+ * sama sekali tidak punya record job ini, tapi kita masih punya assetId-nya
+ * di localStorage. Memulihkan status tanpa perlu user pencet apa-apa.
+ */
+async function recheckByAssetId(item) {
+  try {
+    const res = await fetch(`/api/recheck-by-asset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operationId: item.operationId, assetId: item.assetId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Recheck gagal');
+
+    item.status = data.status;
+    item.assetId = data.assetId;
+    item.error = data.error;
+    renderQueue();
+    persistQueue();
+  } catch (err) {
+    item.status = 'AwaitingManualRecheck';
+    item.error = 'Gagal memulihkan otomatis: ' + err.message;
+    renderQueue();
+    persistQueue();
+  }
+}
+
 // Boot: sambungkan realtime dulu, baru pulihkan riwayat upload kalau ada.
 connectRealtime();
 restoreQueue();
@@ -901,4 +978,3 @@ restoreQueue();
 
 </body>
 </html>
-
