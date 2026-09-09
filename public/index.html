@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>uploader.sh — Roblox Music Uploader</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js"></script>
 <style>
   @font-face {
     font-family: 'JetBrains Mono';
@@ -47,6 +48,26 @@
     inset: 0;
     z-index: 0;
     display: block;
+  }
+
+  .watermark {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .watermark span {
+    font-size: 16vw;
+    font-weight: 700;
+    color: var(--violet);
+    opacity: 0.14;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    text-shadow: 0 0 40px rgba(178,107,255,0.6);
   }
 
   .page {
@@ -355,6 +376,8 @@
 
 <canvas id="matrixRain"></canvas>
 
+<div class="watermark"><span>annisa❤</span></div>
+
 <div class="page">
 
 <div class="brand">
@@ -399,7 +422,9 @@
   const ctx = canvas.getContext('2d');
   let cols, drops, fontSize = 15;
 
-  const chars = 'アイウエオカキクケコサシスセソタチツテト0123456789ABCDEF<>/\\{}[]#$%&';
+  // Karakter hujan diambil dari nama "PACALANK" sendiri, jadi background
+  // keliatan hacker-style tapi tetap kebaca identitas komunitasnya.
+  const chars = 'PACALANK';
 
   function resize() {
     canvas.width = window.innerWidth;
@@ -648,10 +673,10 @@ function statusToClass(status) {
 }
 function statusToLabel(item) {
   if (item.status === 'Approved') return `lolos — asset id: ${item.assetId}`;
-  if (item.status === 'Rejected') return `ditolak — ${item.error || 'moderasi Roblox'}`;
+  if (item.status === 'Rejected') return `ditolak — ${item.error || 'moderasi Roblox'}${item.assetId ? ' (asset id: ' + item.assetId + ')' : ''}`;
   if (item.status === 'Error') return `error — ${item.error || 'unknown'}`;
-  if (item.status === 'AwaitingManualRecheck') return 'auto-check berhenti sementara, masih diproses roblox';
-  if (item.status === 'Pending') return 'menunggu moderasi roblox...';
+  if (item.status === 'AwaitingManualRecheck') return `auto-check berhenti sementara, masih diproses roblox${item.assetId ? ' (asset id: ' + item.assetId + ')' : ''}`;
+  if (item.status === 'Pending') return `menunggu moderasi roblox...${item.assetId ? ' (asset id: ' + item.assetId + ')' : ' (asset belum dibuat)'}`;
   return item.status;
 }
 
@@ -699,12 +724,12 @@ async function applySpeed(idx) {
     source.start(0);
 
     const rendered = await offlineCtx.startRendering();
-    const wavBlob = audioBufferToWaveBlob(rendered);
+    const mp3Blob = audioBufferToMp3Blob(rendered, 128);
 
     const speedTag = item.speed.toFixed(2) + 'x';
     const baseName = item.fileName.replace(/\.[^/.]+$/, '');
-    const newFileName = `${baseName}_${speedTag}.wav`;
-    const newFile = new File([wavBlob], newFileName, { type: 'audio/wav' });
+    const newFileName = `${baseName}_${speedTag}.mp3`;
+    const newFile = new File([mp3Blob], newFileName, { type: 'audio/mpeg' });
 
     URL.revokeObjectURL(item.previewUrl);
     item.file = newFile;
@@ -723,50 +748,47 @@ async function applySpeed(idx) {
   }
 }
 
-/** Encode AudioBuffer jadi WAV (PCM 16-bit) supaya bisa diupload sebagai file audio biasa. */
-function audioBufferToWaveBlob(buffer) {
-  const numChannels = buffer.numberOfChannels;
+/**
+ * Encode AudioBuffer jadi MP3 (bukan WAV) pakai lamejs, supaya ukuran file
+ * hasil proses speed tetap kecil - sama seperti file MP3 asli, bukan
+ * uncompressed PCM yang bisa berkali-kali lipat lebih besar.
+ */
+function audioBufferToMp3Blob(buffer, kbps = 128) {
+  const numChannels = Math.min(buffer.numberOfChannels, 2); // lamejs max 2 channel
   const sampleRate = buffer.sampleRate;
-  const numFrames = buffer.length;
-  const bytesPerSample = 2;
-  const blockAlign = numChannels * bytesPerSample;
-  const dataSize = numFrames * blockAlign;
+  const encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps);
 
-  const arrayBuffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(arrayBuffer);
+  const left = floatTo16BitPCM(buffer.getChannelData(0));
+  const right = numChannels > 1 ? floatTo16BitPCM(buffer.getChannelData(1)) : null;
 
-  function writeString(offset, str) {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-  }
+  const chunks = [];
+  const sampleBlockSize = 1152; // ukuran frame standar mp3
 
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * blockAlign, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
-  writeString(36, 'data');
-  view.setUint32(40, dataSize, true);
-
-  const channelData = [];
-  for (let ch = 0; ch < numChannels; ch++) channelData.push(buffer.getChannelData(ch));
-
-  let offset = 44;
-  for (let i = 0; i < numFrames; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      let sample = Math.max(-1, Math.min(1, channelData[ch][i]));
-      sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      view.setInt16(offset, sample, true);
-      offset += 2;
+  for (let i = 0; i < left.length; i += sampleBlockSize) {
+    const leftChunk = left.subarray(i, i + sampleBlockSize);
+    let mp3buf;
+    if (right) {
+      const rightChunk = right.subarray(i, i + sampleBlockSize);
+      mp3buf = encoder.encodeBuffer(leftChunk, rightChunk);
+    } else {
+      mp3buf = encoder.encodeBuffer(leftChunk);
     }
+    if (mp3buf.length > 0) chunks.push(new Uint8Array(mp3buf));
   }
 
-  return new Blob([arrayBuffer], { type: 'audio/wav' });
+  const finalBuf = encoder.flush();
+  if (finalBuf.length > 0) chunks.push(new Uint8Array(finalBuf));
+
+  return new Blob(chunks, { type: 'audio/mpeg' });
+}
+
+function floatTo16BitPCM(floatArray) {
+  const out = new Int16Array(floatArray.length);
+  for (let i = 0; i < floatArray.length; i++) {
+    let s = Math.max(-1, Math.min(1, floatArray[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
 }
 
 uploadBtn.addEventListener('click', async () => {
