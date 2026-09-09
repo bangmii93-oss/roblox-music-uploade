@@ -76,7 +76,9 @@ app.post('/api/upload', upload.single('audio'), async (req, res) => {
 });
 
 /**
- * STEP 2: Poll Roblox until moderation finishes, then store the asset ID.
+ * STEP 2: Poll Roblox until the upload operation itself finishes (asset object created).
+ * NOTE: this does NOT mean moderation passed yet - Roblox creates the asset object
+ * first, then runs content moderation separately. We check moderationResult next.
  */
 async function pollRobloxStatus(operationId, operationPath, attempt = 0) {
   const MAX_ATTEMPTS = 60; // ~5 minutes at 5s interval
@@ -89,8 +91,21 @@ async function pollRobloxStatus(operationId, operationPath, attempt = 0) {
 
     if (data.done) {
       if (data.response && data.response.assetId) {
-        jobs[operationId].status = 'Approved';
-        jobs[operationId].assetId = data.response.assetId;
+        const assetId = data.response.assetId;
+        const moderationState = data.response.moderationResult?.moderationState;
+
+        if (moderationState === 'MODERATION_STATE_APPROVED') {
+          jobs[operationId].status = 'Approved';
+          jobs[operationId].assetId = assetId;
+        } else if (moderationState === 'MODERATION_STATE_REJECTED') {
+          jobs[operationId].status = 'Rejected';
+          jobs[operationId].error = 'Ditolak moderasi Roblox';
+        } else {
+          // Asset object created, but moderation verdict not final yet.
+          // Keep checking the asset itself until moderation settles.
+          jobs[operationId].status = 'Pending';
+          pollAssetModeration(operationId, assetId);
+        }
       } else if (data.error) {
         jobs[operationId].status = 'Rejected';
         jobs[operationId].error = data.error.message || 'Ditolak moderasi Roblox';
@@ -108,6 +123,43 @@ async function pollRobloxStatus(operationId, operationPath, attempt = 0) {
     }
 
     setTimeout(() => pollRobloxStatus(operationId, operationPath, attempt + 1), 5000);
+  } catch (err) {
+    jobs[operationId].status = 'Error';
+    jobs[operationId].error = err.response?.data?.message || err.message;
+  }
+}
+
+/**
+ * STEP 2b: Once the asset exists, keep checking its real moderation verdict
+ * (moderationResult.moderationState) until it settles as Approved/Rejected.
+ */
+async function pollAssetModeration(operationId, assetId, attempt = 0) {
+  const MAX_ATTEMPTS = 60; // ~5 more minutes at 5s interval
+  try {
+    const assetRes = await axios.get(`https://apis.roblox.com/assets/v1/assets/${assetId}`, {
+      headers: { 'x-api-key': ROBLOX_API_KEY }
+    });
+
+    const moderationState = assetRes.data.moderationResult?.moderationState;
+
+    if (moderationState === 'MODERATION_STATE_APPROVED') {
+      jobs[operationId].status = 'Approved';
+      jobs[operationId].assetId = assetId;
+      return;
+    }
+    if (moderationState === 'MODERATION_STATE_REJECTED') {
+      jobs[operationId].status = 'Rejected';
+      jobs[operationId].error = 'Ditolak moderasi Roblox';
+      return;
+    }
+
+    if (attempt >= MAX_ATTEMPTS) {
+      jobs[operationId].status = 'Timeout';
+      jobs[operationId].error = 'Melebihi batas waktu menunggu hasil moderasi akhir';
+      return;
+    }
+
+    setTimeout(() => pollAssetModeration(operationId, assetId, attempt + 1), 5000);
   } catch (err) {
     jobs[operationId].status = 'Error';
     jobs[operationId].error = err.response?.data?.message || err.message;
