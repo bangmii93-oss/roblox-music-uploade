@@ -265,11 +265,29 @@ app.get('/api/events', (req, res) => {
 });
 
 /**
- * STEP 4: Manual recheck untuk satu job (dipanggil dari tombol "Cek ulang status").
+ * STEP 4: Manual recheck untuk satu job (dipanggil dari tombol "cek ulang").
+ * FIX: kalau server sudah tidak punya record job ini (restart/redeploy) tapi
+ * client masih simpan assetId-nya di localStorage (dikirim di body), job
+ * dibuat ulang di sini alih-alih langsung 404 - supaya recheck tetap bisa
+ * jalan tanpa perlu upload ulang dari awal.
  */
 app.post('/api/recheck/:operationId', async (req, res) => {
   const operationId = req.params.operationId;
-  const job = jobs[operationId];
+  let job = jobs[operationId];
+  const clientAssetId = req.body?.assetId;
+
+  if (!job && clientAssetId) {
+    jobs[operationId] = {
+      status: 'Pending',
+      assetId: clientAssetId,
+      error: null,
+      displayName: null,
+      fileName: null,
+      operationPath: null
+    };
+    job = jobs[operationId];
+  }
+
   if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
 
   try {
@@ -304,6 +322,49 @@ app.post('/api/recheck/:operationId', async (req, res) => {
       return res.status(400).json({ error: 'Job tidak punya operationPath maupun assetId, tidak bisa di-recheck' });
     }
 
+    res.json(jobs[operationId]);
+  } catch (err) {
+    updateJob(operationId, { status: 'Error', error: err.response?.data?.message || err.message });
+    res.status(500).json(jobs[operationId]);
+  }
+});
+
+/**
+ * STEP 4b (FIX BARU): Dipanggil otomatis dari client saat /api/status-batch
+ * balikin 'NotFound' untuk sebuah job, tapi client masih punya assetId-nya
+ * di localStorage. Membuat ulang job record di server lalu langsung cek
+ * status asli ke Roblox - supaya job yang "dilupakan" server (habis restart)
+ * bisa pulih otomatis tanpa perlu user pencet apa-apa.
+ */
+app.post('/api/recheck-by-asset', async (req, res) => {
+  const { operationId, assetId } = req.body || {};
+  if (!operationId || !assetId) {
+    return res.status(400).json({ error: 'operationId dan assetId wajib diisi' });
+  }
+
+  jobs[operationId] = jobs[operationId] || {
+    status: 'Pending',
+    assetId,
+    error: null,
+    displayName: null,
+    fileName: null,
+    operationPath: null
+  };
+
+  try {
+    const assetRes = await axios.get(`https://apis.roblox.com/assets/v1/assets/${assetId}`, {
+      headers: { 'x-api-key': ROBLOX_API_KEY }
+    });
+    const moderationState = assetRes.data.moderationResult?.moderationState;
+
+    if (moderationState === 'MODERATION_STATE_APPROVED') {
+      updateJob(operationId, { status: 'Approved', error: null });
+    } else if (moderationState === 'MODERATION_STATE_REJECTED') {
+      updateJob(operationId, { status: 'Rejected', error: 'Ditolak moderasi Roblox' });
+    } else {
+      updateJob(operationId, { status: 'Pending', error: null });
+      pollAssetModeration(operationId, assetId);
+    }
     res.json(jobs[operationId]);
   } catch (err) {
     updateJob(operationId, { status: 'Error', error: err.response?.data?.message || err.message });
