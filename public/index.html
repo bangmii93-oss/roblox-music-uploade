@@ -186,20 +186,58 @@
   .field-label::before { content: "> "; color: var(--violet); }
 
   .dropzone {
-    border: 1px dashed var(--line);
-    border-radius: 6px;
-    padding: 22px 16px;
+    border: 2px dashed var(--line);
+    border-radius: 14px;
+    padding: 32px 20px;
     text-align: center;
     cursor: pointer;
     color: var(--dim);
     font-size: 13px;
-    background: rgba(178,107,255,0.03);
-    transition: border-color .15s, background .15s;
+    background: radial-gradient(circle at 50% 0%, rgba(178,107,255,0.10), rgba(178,107,255,0.02) 70%);
+    transition: border-color .2s, background .2s, transform .15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .dropzone-icon {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(178,107,255,0.10);
+    border: 1px solid var(--line-dim);
+    transition: transform .2s, background .2s, border-color .2s;
+  }
+  .dropzone-icon svg {
+    width: 20px;
+    height: 20px;
+    stroke: var(--violet-bright);
+    transition: transform .2s;
+  }
+  .dropzone-title {
+    font-size: 14px;
+    color: var(--text);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .dropzone-title .accent { color: var(--violet-bright); }
+  .dropzone-sub {
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.03em;
   }
   .dropzone:hover, .dropzone.drag {
     border-color: var(--violet);
-    background: rgba(178,107,255,0.07);
+    background: radial-gradient(circle at 50% 0%, rgba(178,107,255,0.18), rgba(178,107,255,0.03) 70%);
+    transform: translateY(-1px);
   }
+  .dropzone:hover .dropzone-icon, .dropzone.drag .dropzone-icon {
+    background: rgba(178,107,255,0.2);
+    border-color: var(--violet);
+  }
+  .dropzone.drag .dropzone-icon svg { transform: translateY(-3px); }
   .dropzone .accent { color: var(--violet-bright); }
   input[type=file] { display: none; }
 
@@ -378,6 +416,98 @@
   }
   .log.show { display: block; }
   .log div { margin-bottom: 3px; }
+
+  /* --- Riwayat upload --- */
+  .history-term {
+    max-width: 560px;
+    margin: 18px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px rgba(178,107,255,0.08), 0 12px 40px rgba(0,0,0,0.4);
+    overflow: hidden;
+    display: none;
+  }
+  .history-term.show { display: block; }
+  .history-body { padding: 16px 18px 18px; }
+  .history-title {
+    font-size: 13px;
+    color: var(--dim);
+    letter-spacing: 0.05em;
+    margin: 0 0 12px;
+  }
+  .history-title::before { content: "> "; color: var(--violet); }
+  .history-empty { font-size: 12px; color: var(--dim); }
+
+  .history-item {
+    border: 1px solid var(--line-dim);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    background: rgba(20, 10, 40, 0.4);
+  }
+  .history-item-name {
+    font-size: 13px;
+    color: var(--text);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .history-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .history-item-label {
+    font-size: 11px;
+    color: var(--dim);
+    flex-shrink: 0;
+    width: 30px;
+  }
+  .history-item-value {
+    flex: 1;
+    font-size: 12px;
+    color: var(--violet-bright);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .copy-btn {
+    flex-shrink: 0;
+    background: rgba(178,107,255,0.1);
+    border: 1px solid var(--line-dim);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    width: auto;
+    margin: 0;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .copy-btn:hover {
+    border-color: var(--violet);
+    color: var(--violet-bright);
+  }
+  .copy-btn.copied {
+    border-color: var(--ok);
+    color: var(--ok);
+    background: rgba(61,255,168,0.08);
+  }
+
+  /* --- Footer --- */
+  .footer {
+    text-align: center;
+    margin-top: 26px;
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.15em;
+    opacity: 0.8;
+  }
+  .footer b { color: var(--violet-bright); }
 </style>
 </head>
 <body>
@@ -408,8 +538,14 @@
 
     <div class="field">
       <div class="dropzone" id="dropzone">
-        <span class="accent">drop files here</span> or click to browse<br>
-        <span style="font-size:11px;">mp3 / ogg / wav — bisa pilih banyak sekaligus</span>
+        <div class="dropzone-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 16V4M12 4l-4 4M12 4l4 4"/>
+            <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+          </svg>
+        </div>
+        <div class="dropzone-title"><span class="accent">drop files here</span> or click to browse</div>
+        <div class="dropzone-sub">mp3 / ogg / wav — bisa pilih banyak sekaligus</div>
       </div>
       <input type="file" id="audioFile" accept="audio/*" multiple>
     </div>
@@ -421,6 +557,19 @@
     <div class="log" id="log"></div>
   </div>
 </div>
+
+<div class="history-term" id="historyTerm">
+  <div class="titlebar">
+    <div class="dot a"></div><div class="dot b"></div><div class="dot c"></div>
+    <span>riwayat_upload.log</span>
+  </div>
+  <div class="history-body">
+    <p class="history-title">upload_history</p>
+    <div id="historyList"></div>
+  </div>
+</div>
+
+<footer class="footer">by: <b>pacalankcommunity</b></footer>
 
 </div>
 
@@ -477,6 +626,11 @@ const audioFile = document.getElementById('audioFile');
 const queueEl = document.getElementById('queue');
 const uploadBtn = document.getElementById('uploadBtn');
 const logEl = document.getElementById('log');
+const historyTerm = document.getElementById('historyTerm');
+const historyList = document.getElementById('historyList');
+
+const HISTORY_KEY = 'pacalank_upload_history_v1';
+const MAX_HISTORY = 100;
 
 // queueFiles: array of { file, fileName, fileSize, displayName, status, assetId, error }
 // Tidak ada lagi pengecekan moderasi Roblox di sini - status cuma:
@@ -523,6 +677,89 @@ function formatSize(bytes) {
   if (!bytes && bytes !== 0) return '';
   if (bytes < 1024*1024) return (bytes/1024).toFixed(0) + ' KB';
   return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+
+/**
+ * RIWAYAT UPLOAD: setiap file yang selesai diupload (dapat asset id) dicatat
+ * ke localStorage, supaya nama lagu & asset id-nya bisa dilihat/disalin lagi
+ * kapan saja meski tab ditutup atau di-refresh.
+ */
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveToHistory(entry) {
+  const history = loadHistory();
+  history.unshift({ ...entry, time: Date.now() }); // yang terbaru di paling atas
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
+  } catch (e) { /* localStorage penuh/nonaktif, abaikan saja */ }
+  renderHistory();
+}
+
+function formatHistoryTime(ts) {
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderHistory() {
+  const history = loadHistory();
+  historyTerm.classList.toggle('show', history.length > 0);
+  if (history.length === 0) {
+    historyList.innerHTML = '<p class="history-empty">belum ada riwayat upload</p>';
+    return;
+  }
+
+  historyList.innerHTML = history.map((entry, idx) => `
+    <div class="history-item">
+      <div class="history-item-name">${entry.displayName}</div>
+      <div class="history-item-row">
+        <span class="history-item-label">nama</span>
+        <span class="history-item-value">${entry.displayName}</span>
+        <button class="copy-btn" data-copy="${encodeURIComponent(entry.displayName)}" data-idx="${idx}" data-field="name">salin</button>
+      </div>
+      <div class="history-item-row">
+        <span class="history-item-label">id</span>
+        <span class="history-item-value">${entry.assetId}</span>
+        <button class="copy-btn" data-copy="${encodeURIComponent(entry.assetId)}" data-idx="${idx}" data-field="id">salin</button>
+      </div>
+      <div class="history-item-row">
+        <span class="history-item-label" style="width:auto;font-size:10px;">${formatHistoryTime(entry.time)}</span>
+      </div>
+    </div>
+  `).join('');
+
+  historyList.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => copyToClipboard(decodeURIComponent(btn.dataset.copy), btn));
+  });
+}
+
+async function copyToClipboard(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    // fallback buat browser lama / konteks non-https
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e2) { /* abaikan */ }
+    document.body.removeChild(ta);
+  }
+  const original = btn.textContent;
+  btn.textContent = 'disalin!';
+  btn.classList.add('copied');
+  setTimeout(() => {
+    btn.textContent = original;
+    btn.classList.remove('copied');
+  }, 1500);
 }
 
 function renderQueue() {
@@ -757,6 +994,7 @@ uploadBtn.addEventListener('click', async () => {
       if (item) {
         item.status = 'Done';
         item.assetId = u.assetId;
+        saveToHistory({ fileName: item.fileName, displayName: item.displayName, assetId: item.assetId });
       }
     });
     data.failed.forEach(f => {
@@ -781,6 +1019,9 @@ uploadBtn.addEventListener('click', async () => {
     uploadBtn.textContent = 'upload --batch';
   }
 });
+
+// Boot: tampilkan riwayat upload yang tersimpan (kalau ada).
+renderHistory();
 
 </script>
 
