@@ -1,0 +1,16 @@
+{
+  "name": "roblox-music-uploader",
+  "version": "1.0.0",
+  "description": "Upload musik ke Roblox via Open Cloud API, dengan preview, playback speed, dan auto-ambil Asset ID setelah lolos moderasi",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "axios": "^1.7.2",
+    "form-data": "^4.0.0",
+    "dotenv": "^16.4.5"
+  }
+}
